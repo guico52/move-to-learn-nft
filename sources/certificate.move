@@ -8,12 +8,8 @@ module dev::certificate {
     use std::vector;
     use aptos_std::big_ordered_map;
     use aptos_std::big_ordered_map::BigOrderedMap;
-    use aptos_std::debug;
     use aptos_std::table;
     use aptos_std::table::Table;
-    use aptos_std::table_with_length;
-    use aptos_std::table_with_length::TableWithLength;
-    use aptos_framework::account;
     use aptos_framework::coin;
     use aptos_framework::event;
     use aptos_framework::object;
@@ -83,25 +79,51 @@ module dev::certificate {
         certificates: Table<String, Table<address, CourseCertificate>> // course_id ->  user_id -> CourseCertificate
     }
 
-    // 事件相关
-    struct CertificateEvents has key {
-        mint_certificate_events: event::EventHandle<MintCertificateEvent>,
-        course_register_events: event::EventHandle<CourseRegisterEvent>,
-    }
 
     // 铸造证书事件
+    #[event]
     struct MintCertificateEvent has drop, store {
         course_id: String,
         recipient: address,
         token_id: address,
         timestamp: u64,
         points: u64,
+        status: String, // started/completed
     }
 
     // 课程注册事件
+    #[event]
     struct CourseRegisterEvent has drop, store {
         course_id: String,
         points: u64,
+        timestamp: u64,
+        operation_type: String, // new/update/delete
+        metadata_uri: String,
+    }
+
+    // 代币铸造事件
+    #[event]
+    struct CoinMintEvent has drop, store {
+        recipient: address,
+        amount: u64,
+        timestamp: u64,
+    }
+
+    // 证书转移事件
+    #[event]
+    struct CertificateTransferEvent has drop, store {
+        course_id: String,
+        from: address,
+        to: address,
+        token_id: address,
+        timestamp: u64,
+    }
+
+    // 错误事件
+    #[event]
+    struct ErrorEvent has drop, store {
+        error_code: u64,
+        error_message: String,
         timestamp: u64,
     }
 
@@ -121,11 +143,6 @@ module dev::certificate {
         move_to(admin, MintStore { cap: mint });
         move_to(admin, BurnStore { cap: burn });
         move_to(admin, FreezeStore { cap: freeze });
-        // 初始化事件
-        move_to(admin, CertificateEvents {
-            mint_certificate_events: account::new_event_handle<MintCertificateEvent>(admin),
-            course_register_events: account::new_event_handle<CourseRegisterEvent>(admin),
-        });
     }
 
     // 注册/更新课程
@@ -135,10 +152,21 @@ module dev::certificate {
         points: u64,
         metadata_uri: String
     ) acquires CourseRegistry {
-        assert!(is_admin(admin), E_NOT_ADMIN); // 确保调用者是管理员
+        // 错误处理
+        if (!is_admin(admin)) {
+            event::emit(ErrorEvent {
+                error_code: E_NOT_ADMIN,
+                error_message: utf8(b"Caller is not admin"),
+                timestamp: aptos_framework::timestamp::now_seconds(),
+            });
+            assert!(false, E_NOT_ADMIN);
+        };
+
         let registry = borrow_global_mut<CourseRegistry>(signer::address_of(admin));
+        let is_new = !registry.courses.contains(&course_id);
+        
         // 如果课程不存在，说明是插入操作，因此需要为这个课程添加证书
-        if (!registry.courses.contains(&course_id)) {
+        if (is_new) {
             let admin_address = signer::address_of(admin);
             // 设置版税为100%，避免被转售
             let cert_name = concat_strings(utf8(b"Certificate of "), course_id);
@@ -153,9 +181,19 @@ module dev::certificate {
             let collection = cert_collection;
             move_to(admin, CourseCollection { inner: cert_collection });
         };
+
         registry.courses.upsert(course_id, CourseMeta {
             points,
             metadata_uri
+        });
+
+        // 触发课程注册事件
+        event::emit(CourseRegisterEvent {
+            course_id,
+            points,
+            timestamp: aptos_framework::timestamp::now_seconds(),
+            operation_type: if (is_new) { utf8(b"new") } else { utf8(b"update") },
+            metadata_uri,
         });
     }
 
@@ -164,10 +202,37 @@ module dev::certificate {
         admin: &signer,
         course_id: String
     ) acquires CourseRegistry {
-        assert!(is_admin(admin), E_NOT_ADMIN); // 确保调用者是管理员
+        if (!is_admin(admin)) {
+            event::emit(ErrorEvent {
+                error_code: E_NOT_ADMIN,
+                error_message: utf8(b"Caller is not admin"),
+                timestamp: aptos_framework::timestamp::now_seconds(),
+            });
+            assert!(false, E_NOT_ADMIN);
+        };
+
         let registry = borrow_global_mut<CourseRegistry>(signer::address_of(admin));
-        assert!(registry.courses.contains(&course_id), E_COURSE_NOT_FOUND); // 确保课程存在
-        registry.courses.remove(&course_id)
+        if (!registry.courses.contains(&course_id)) {
+            event::emit(ErrorEvent {
+                error_code: E_COURSE_NOT_FOUND,
+                error_message: utf8(b"Course not found"),
+                timestamp: aptos_framework::timestamp::now_seconds(),
+            });
+            assert!(false, E_COURSE_NOT_FOUND);
+        };
+
+        let course_meta = registry.courses.borrow(&course_id);
+        let points = course_meta.points;
+        let metadata_uri = course_meta.metadata_uri;
+        registry.courses.remove(&course_id);
+
+        event::emit(CourseRegisterEvent {
+            course_id,
+            points,
+            timestamp: aptos_framework::timestamp::now_seconds(),
+            operation_type: utf8(b"delete"),
+            metadata_uri,
+        });
     }
 
     // 获取课程信息
@@ -189,16 +254,49 @@ module dev::certificate {
         user: &signer,
         course_id: String,
         coin_amount: u64
-    ) acquires UserCertificatesTable, MintStore, CourseCollection {
-        // 验证管理员权限
-        assert!(is_admin(admin), E_NOT_ADMIN);
-        // 验证用户是否已经拥有该课程证书
+    ) acquires UserCertificatesTable, MintStore, CourseCollection, CourseRegistry {
         let user_address = signer::address_of(user);
-        assert!(!has_certificate(user_address, course_id), E_ALREADY_HAVE_CERTIFICATE);
+
+        // 验证管理员权限
+        if (!is_admin(admin)) {
+            event::emit(ErrorEvent {
+                error_code: E_NOT_ADMIN,
+                error_message: utf8(b"Caller is not admin"),
+                timestamp: aptos_framework::timestamp::now_seconds(),
+            });
+            assert!(false, E_NOT_ADMIN);
+        };
+
+        // 验证用户是否已经拥有该课程证书
+        if (has_certificate(user_address, course_id)) {
+            event::emit(ErrorEvent {
+                error_code: E_ALREADY_HAVE_CERTIFICATE,
+                error_message: utf8(b"User already has certificate"),
+                timestamp: aptos_framework::timestamp::now_seconds(),
+            });
+            assert!(false, E_ALREADY_HAVE_CERTIFICATE);
+        };
+
+        // 开始铸造证书事件
+        event::emit(MintCertificateEvent {
+            course_id: course_id,
+            recipient: user_address,
+            token_id: @0x0, // 临时地址，稍后更新
+            timestamp: aptos_framework::timestamp::now_seconds(),
+            points: 0, // 临时值，稍后更新
+            status: utf8(b"started"),
+        });
+
         // 铸造代币
         if (coin_amount > 0) {
             mint_coin_to_account(admin, user_address, coin_amount);
+            event::emit(CoinMintEvent {
+                recipient: user_address,
+                amount: coin_amount,
+                timestamp: aptos_framework::timestamp::now_seconds(),
+            });
         };
+
         // 铸造证书NFT
         let collection = borrow_global<CourseCollection>(@dev);
         let collection_constructor_ref = collection.inner;
@@ -212,11 +310,35 @@ module dev::certificate {
             utf8(b"Course Certificate")
         );
         let token = object::object_from_constructor_ref<Token>(&token_constructor_ref);
+        let token_address = object::object_address(&token);
+
         // 记录证书发放
         record_certificate(course_id, admin, user, token);
+
+        // 获取课程积分
+        let registry = borrow_global<CourseRegistry>(@dev);
+        let course_meta = registry.courses.borrow(&course_id);
+        let points = course_meta.points;
+
         // 转移证书给用户
         object::transfer(admin, token, user_address);
-        debug::print(&utf8(b"Certificate minted and coins sent to user"));
+        event::emit(CertificateTransferEvent {
+            course_id,
+            from: signer::address_of(admin),
+            to: user_address,
+            token_id: token_address,
+            timestamp: aptos_framework::timestamp::now_seconds(),
+        });
+
+        // 完成铸造证书事件
+        event::emit(MintCertificateEvent {
+            course_id,
+            recipient: user_address,
+            token_id: token_address,
+            timestamp: aptos_framework::timestamp::now_seconds(),
+            points,
+            status: utf8(b"completed"),
+        });
     }
 
     // ========================== 视图函数部分 ========================
@@ -291,7 +413,6 @@ module dev::certificate {
 
 
     // 铸造coin到对应的账户
-    // admin账户需要预检查，此函数不做检查
     fun mint_coin_to_account(
         admin: &signer,
         recipient: address,
@@ -300,6 +421,12 @@ module dev::certificate {
         let mint_cap = borrow_global<MintStore>(signer::address_of(admin)).cap;
         let coin = coin::mint(amount, &mint_cap);
         coin::deposit(recipient, coin);
+        
+        event::emit(CoinMintEvent {
+            recipient,
+            amount,
+            timestamp: aptos_framework::timestamp::now_seconds(),
+        });
     }
 
     // 检查用户是否已经拥有某个课程的证书
