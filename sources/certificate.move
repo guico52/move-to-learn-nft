@@ -2,15 +2,22 @@
 module dev::certificate {
 
     use std::option;
+    use std::option::Option;
     use std::signer;
     use std::string::{utf8, String};
     use std::vector;
+    use aptos_std::big_ordered_map;
+    use aptos_std::big_ordered_map::BigOrderedMap;
     use aptos_std::debug;
     use aptos_std::table;
     use aptos_std::table::Table;
+    use aptos_std::table_with_length;
+    use aptos_std::table_with_length::TableWithLength;
+    use aptos_framework::account;
     use aptos_framework::coin;
+    use aptos_framework::event;
     use aptos_framework::object;
-    use aptos_framework::object::ConstructorRef;
+    use aptos_framework::object::{ConstructorRef, Object};
     use aptos_token_objects::token::Token;
     use aptos_token_objects::collection::Collection;
     use aptos_token_objects::royalty;
@@ -55,7 +62,7 @@ module dev::certificate {
 
     // 课程注册表
     struct CourseRegistry has key {
-        courses: Table<String, CourseMeta>
+        courses: BigOrderedMap<String, CourseMeta>
     }
 
     // 课程证书集合
@@ -65,12 +72,37 @@ module dev::certificate {
 
     // 课程证书NFT
     struct CourseCertificate has key, store {
-        token: token::Token
+        token: Object<token::Token>,
+        token_address: address,
+        user: address,
+        course_id: String
     }
 
     // 用户证书记录表
-    struct UserCertificates has key {
-        certificates: Table<String, vector<address>> // course_id -> user addresses
+    struct UserCertificatesTable has key {
+        certificates: Table<String, Table<address, CourseCertificate>> // course_id ->  user_id -> CourseCertificate
+    }
+
+    // 事件相关
+    struct CertificateEvents has key {
+        mint_certificate_events: event::EventHandle<MintCertificateEvent>,
+        course_register_events: event::EventHandle<CourseRegisterEvent>,
+    }
+
+    // 铸造证书事件
+    struct MintCertificateEvent has drop, store {
+        course_id: String,
+        recipient: address,
+        token_id: address,
+        timestamp: u64,
+        points: u64,
+    }
+
+    // 课程注册事件
+    struct CourseRegisterEvent has drop, store {
+        course_id: String,
+        points: u64,
+        timestamp: u64,
     }
 
     // ================= 合约交互部分 ====================
@@ -78,7 +110,7 @@ module dev::certificate {
     public entry fun initialize(admin: &signer) {
         assert!(is_admin(admin), E_NOT_ADMIN);
         move_to(admin, CourseRegistry {
-            courses: table::new()
+            courses: big_ordered_map::new()
         });
         let coin_name = utf8(b"m2l_coin");
         let coin_symbol = utf8(b"m2l");
@@ -89,19 +121,11 @@ module dev::certificate {
         move_to(admin, MintStore { cap: mint });
         move_to(admin, BurnStore { cap: burn });
         move_to(admin, FreezeStore { cap: freeze });
-        // 注册课程证书集合
-        let admin_address = signer::address_of(admin);
-        // 设置版税为100%，避免被转售
-        let royalty = royalty::create(1, 1, admin_address);
-        let cert_collection = collection::create_unlimited_collection(
-            admin,
-            utf8(b"course_certificates"),
-            utf8(b"course_certificates"),
-            option::some(royalty),
-            utf8(b"course_certificates")
-        );
-        let collection = cert_collection;
-        move_to(admin, CourseCollection { inner: cert_collection });
+        // 初始化事件
+        move_to(admin, CertificateEvents {
+            mint_certificate_events: account::new_event_handle<MintCertificateEvent>(admin),
+            course_register_events: account::new_event_handle<CourseRegisterEvent>(admin),
+        });
     }
 
     // 注册/更新课程
@@ -113,7 +137,22 @@ module dev::certificate {
     ) acquires CourseRegistry {
         assert!(is_admin(admin), E_NOT_ADMIN); // 确保调用者是管理员
         let registry = borrow_global_mut<CourseRegistry>(signer::address_of(admin));
-        assert!(!registry.courses.contains(course_id), E_COURSE_ALREADY_EXISTS); // 确保课程不存在
+        // 如果课程不存在，说明是插入操作，因此需要为这个课程添加证书
+        if (!registry.courses.contains(&course_id)) {
+            let admin_address = signer::address_of(admin);
+            // 设置版税为100%，避免被转售
+            let cert_name = concat_strings(utf8(b"Certificate of "), course_id);
+            let royalty = royalty::create(1, 1, admin_address);
+            let cert_collection = collection::create_unlimited_collection(
+                admin,
+                utf8(b"course_certificates"),
+                cert_name,
+                option::some(royalty),
+                utf8(b"course_certificates")
+            );
+            let collection = cert_collection;
+            move_to(admin, CourseCollection { inner: cert_collection });
+        };
         registry.courses.upsert(course_id, CourseMeta {
             points,
             metadata_uri
@@ -127,8 +166,8 @@ module dev::certificate {
     ) acquires CourseRegistry {
         assert!(is_admin(admin), E_NOT_ADMIN); // 确保调用者是管理员
         let registry = borrow_global_mut<CourseRegistry>(signer::address_of(admin));
-        assert!(registry.courses.contains(course_id), E_COURSE_NOT_FOUND); // 确保课程存在
-        registry.courses.remove(course_id)
+        assert!(registry.courses.contains(&course_id), E_COURSE_NOT_FOUND); // 确保课程存在
+        registry.courses.remove(&course_id)
     }
 
     // 获取课程信息
@@ -136,8 +175,8 @@ module dev::certificate {
         course_id: String
     ): CourseMeta acquires CourseRegistry {
         let registry = borrow_global<CourseRegistry>(@dev);
-        assert!(registry.courses.contains(course_id), E_COURSE_NOT_FOUND); // 确保课程存在
-        let meta = registry.courses.borrow(course_id);
+        assert!(registry.courses.contains(&course_id), E_COURSE_NOT_FOUND); // 确保课程存在
+        let meta = registry.courses.borrow(&course_id);
         CourseMeta {
             points: meta.points,
             metadata_uri: meta.metadata_uri
@@ -150,7 +189,7 @@ module dev::certificate {
         user: &signer,
         course_id: String,
         coin_amount: u64
-    ) acquires UserCertificates, MintStore, CourseCollection {
+    ) acquires UserCertificatesTable, MintStore, CourseCollection {
         // 验证管理员权限
         assert!(is_admin(admin), E_NOT_ADMIN);
         // 验证用户是否已经拥有该课程证书
@@ -164,7 +203,7 @@ module dev::certificate {
         let collection = borrow_global<CourseCollection>(@dev);
         let collection_constructor_ref = collection.inner;
         let collection = object::object_from_constructor_ref<Collection>(&collection_constructor_ref);
-        let token = token::create_token(
+        let token_constructor_ref = token::create_token(
             admin,
             collection,
             concat_strings(utf8(b"Certificate of "), course_id),
@@ -172,23 +211,76 @@ module dev::certificate {
             option::some(SELL_BANNED_ROYALTY),
             utf8(b"Course Certificate")
         );
-
+        let token = object::object_from_constructor_ref<Token>(&token_constructor_ref);
         // 记录证书发放
-        record_certificate(course_id, admin, user);
+        record_certificate(course_id, admin, user, token);
         // 转移证书给用户
-        object::transfer(admin, collection, user_address);
+        object::transfer(admin, token, user_address);
         debug::print(&utf8(b"Certificate minted and coins sent to user"));
     }
 
     // ========================== 视图函数部分 ========================
 
-    // 获取用户的证书列表
-    public fun get_user_certificates(user: address): vector<Token> acquires UserCertificates {
-        if (!exists<UserCertificates>(@dev)) {
-            return vector::empty();
+    // 查看用户拥有的证书
+    public fun view_user_certificates(
+        user_address: address
+    ): vector<Object<Token>> acquires UserCertificatesTable, CourseRegistry {
+        let user_certs = vector::empty<token::Token>();
+        if (!exists<UserCertificatesTable>(@dev)) {
+            return vector::empty()
         };
-        let user_certs = borrow_global<UserCertificates>(@dev);
 
+        let certificates = vector::empty<Object<Token>>();
+        let user_certs = borrow_global<UserCertificatesTable>(@dev);
+        let course_user_table = user_certs.certificates;
+        let courses = borrow_global<CourseRegistry>(@dev).courses;
+        let (course_id_in_loop, course_in_loop) = courses.borrow_front();
+        let course_id_inl_loop = course_id_in_loop;
+        while (true) {
+            let next_course_id = courses.next_key(&course_id_in_loop);
+            if (next_course_id.is_none()) {
+                break;
+            }
+            else {
+                if (course_user_table.contains(course_id_in_loop)) {
+                    let course_table = course_user_table.borrow(course_id_in_loop);
+                    if (course_table.contains(user_address)) {
+                        let course_cert = course_table.borrow(user_address);
+                        let token_address = course_cert.token_address;
+                        let token = object::address_to_object<Token>(token_address);
+                        certificates.push_back(token);
+                    }
+                };
+                course_id_in_loop = *next_course_id.borrow()
+            }
+        };
+        certificates
+    }
+
+    // 查看用户的代币余额
+    public fun view_user_balance(user_address: address): u64 {
+        coin::balance<M2LCoin>(user_address)
+    }
+
+    // 管理员查看证书发放情况
+    public fun view_certificate_stats(
+        admin: &signer,
+        course: String
+    ): Table<address, CourseCertificate> acquires UserCertificatesTable, CourseCertificate {
+        assert!(is_admin(admin), E_NOT_ADMIN);
+        if (!exists<UserCertificatesTable>(@dev)) {
+            let stats = table::new<address, CourseCertificate>();
+            return stats
+        };
+        let user_certs = borrow_global<UserCertificatesTable>(@dev);
+        let courses = user_certs.certificates.borrow(course);
+        return *courses
+    }
+
+    // 管理员查看代币总量
+    public fun view_total_coin_supply(admin: &signer): Option<u128> {
+        assert!(is_admin(admin), E_NOT_ADMIN);
+        coin::supply<M2LCoin>()
     }
 
     // ========================== 工具函数部分 ========================
@@ -211,32 +303,57 @@ module dev::certificate {
     }
 
     // 检查用户是否已经拥有某个课程的证书
-    fun has_certificate(user: address, course_id: String): bool acquires UserCertificates {
-        if (!exists<UserCertificates>(@dev)) {
+    fun has_certificate(user: address, course_id: String): bool acquires UserCertificatesTable {
+        if (!exists<UserCertificatesTable>(@dev)) {
             return false
         };
-        let user_certs = borrow_global<UserCertificates>(@dev);
-        if (!user_certs.certificates.contains(course_id)) {
+        let course_user_certs_table = borrow_global<UserCertificatesTable>(@dev);
+        if (!course_user_certs_table.certificates.contains(course_id)) {
             return false
         };
-        let holders = user_certs.certificates.borrow(course_id);
-        holders.contains(&user)
+        let user_cert_table = course_user_certs_table.certificates.borrow(course_id);
+        if (user_cert_table.contains(user)) {
+            return true
+        };
+        false
     }
 
     // 记录用户获得证书
-    fun record_certificate(course_id: String, admin: &signer, user: &signer) acquires UserCertificates {
-        if (!exists<UserCertificates>(@dev)) {
-            move_to(admin, UserCertificates {
+    fun record_certificate(
+        course_id: String,
+        admin: &signer,
+        user: &signer,
+        token: Object<Token>
+    ) acquires UserCertificatesTable {
+        if (!exists<UserCertificatesTable>(@dev)) {
+            move_to(admin, UserCertificatesTable {
                 certificates: table::new()
             });
         };
-        let user_certs = borrow_global_mut<UserCertificates>(@dev);
+        let user_certs = borrow_global_mut<UserCertificatesTable>(@dev);
         if (!user_certs.certificates.contains(course_id)) {
-            user_certs.certificates.add(course_id, vector::empty());
+            user_certs.certificates.add(course_id, table::new());
         };
-        let holders = user_certs.certificates.borrow_mut(course_id);
+        let user_cert_table = user_certs.certificates.borrow_mut(course_id);
         let user_address = signer::address_of(user);
-        holders.push_back(user_address);
+        let token_address = object::object_address(&token);
+        user_cert_table.add(user_address, CourseCertificate {
+            token,
+            token_address,
+            user: user_address,
+            course_id
+        });
+    }
+
+    // 获取课程证书token
+    fun get_certificate_token(
+        course_id: String,
+        user_address: address
+    ): CourseCertificate acquires UserCertificatesTable {
+        let course_user_token_table = borrow_global_mut<UserCertificatesTable>(@dev);
+        let user_token_table = course_user_token_table.certificates.borrow_mut(course_id);
+        let user_token = user_token_table.borrow(user_address);
+        *user_token
     }
 
     // 字符串拼接辅助函数
@@ -246,6 +363,4 @@ module dev::certificate {
         result.append(*str2.bytes());
         utf8(result)
     }
-
-
 }
