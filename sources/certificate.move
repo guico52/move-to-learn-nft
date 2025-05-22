@@ -8,18 +8,15 @@ module dev::certificate {
     use std::vector;
     use aptos_std::big_ordered_map;
     use aptos_std::big_ordered_map::BigOrderedMap;
-    use aptos_std::table;
-    use aptos_std::table::Table;
     use aptos_framework::coin;
     use aptos_framework::event;
     use aptos_framework::object;
-    use aptos_framework::object::{ConstructorRef, Object};
+    use aptos_framework::object::Object;
     use aptos_token_objects::token::Token;
     use aptos_token_objects::collection::Collection;
     use aptos_token_objects::royalty;
     use aptos_token_objects::token;
     use aptos_token_objects::collection;
-    use aptos_token_objects::royalty::{Royalty};
 
     // Error codes
     const E_NOT_ADMIN: u64 = 1;
@@ -38,8 +35,10 @@ module dev::certificate {
     // Course not found
 
     const ADMIN_ADDRESS: address = @dev; // Admin address
+    const ROYALTY_NUMERATOR: u64 = 100;
+    const ROYALTY_DENOMINATOR: u64 = 100;
 
-    const SELL_BANNED_ROYALTY: Royalty = royalty::create(1, 1, @dev);
+    // const SELL_BANNED_ROYALTY: Royalty = royalty::create(1, 1, @dev);
     // Type definitions
 
     // User points system and capabilities
@@ -52,7 +51,7 @@ module dev::certificate {
     struct FreezeStore has key { cap: coin::FreezeCapability<M2LCoin> }
 
     // Course metadata structure
-    struct CourseMeta has store {
+    struct CourseMeta has store, drop, copy {
         points: u64,
         metadata_uri: String,
     }
@@ -63,12 +62,12 @@ module dev::certificate {
     }
 
     // Course certificate collection
-    struct CourseCollection has store {
-        inner: ConstructorRef,
+    struct CourseCollection has key {
+        collection_address: address
     }
 
     // Course certificate NFT
-    struct CourseCertificate has key, store {
+    struct CourseCertificate has key, store, copy {
         token: Object<token::Token>,
         token_address: address,
         user: address,
@@ -77,7 +76,7 @@ module dev::certificate {
 
     // User certificate record table
     struct UserCertificatesTable has key {
-        certificates: Table<String, Table<address, CourseCertificate>> // course_id ->  user_id -> CourseCertificate
+        certificates: BigOrderedMap<String, BigOrderedMap<address, CourseCertificate>> // course_id ->  user_id -> CourseCertificate
     }
 
     // Mint certificate event
@@ -132,7 +131,11 @@ module dev::certificate {
     public entry fun initialize(admin: &signer) {
         assert!(is_admin(admin), E_NOT_ADMIN);
         move_to(admin, CourseRegistry {
-            courses: big_ordered_map::new()
+            courses: big_ordered_map::new_with_config(
+                0,
+                0,
+                true
+            )
         });
         let coin_name = utf8(b"m2l_coin");
         let coin_symbol = utf8(b"m2l");
@@ -170,16 +173,17 @@ module dev::certificate {
             let admin_address = signer::address_of(admin);
             // Set royalty to 100% to prevent being resold
             let cert_name = concat_strings(utf8(b"Certificate of "), course_id);
-            let royalty = royalty::create(1, 1, admin_address);
-            let cert_collection = collection::create_unlimited_collection(
+            let royalty = royalty::create(ROYALTY_NUMERATOR, ROYALTY_DENOMINATOR, admin_address);
+            let collection_constructor_ref = collection::create_unlimited_collection(
                 admin,
                 utf8(b"course_certificates"),
                 cert_name,
                 option::some(royalty),
                 utf8(b"course_certificates")
             );
-            let collection = cert_collection;
-            move_to(admin, CourseCollection { inner: cert_collection });
+            let collection = object::object_from_constructor_ref<Collection>(&collection_constructor_ref);
+            let collection_address = object::object_address(&collection);
+            move_to(admin, CourseCollection { collection_address });
         };
 
         registry.courses.upsert(course_id, CourseMeta {
@@ -279,7 +283,7 @@ module dev::certificate {
 
         // Start mint certificate event
         event::emit(MintCertificateEvent {
-            course_id: course_id,
+            course_id,
             recipient: user_address,
             token_id: @0x0, // Temporary address, will be updated later
             timestamp: aptos_framework::timestamp::now_seconds(),
@@ -298,15 +302,15 @@ module dev::certificate {
         };
 
         // Mint certificate NFT
-        let collection = borrow_global<CourseCollection>(@dev);
-        let collection_constructor_ref = collection.inner;
-        let collection = object::object_from_constructor_ref<Collection>(&collection_constructor_ref);
+        let collection_data = borrow_global<CourseCollection>(@dev);
+        let collection = object::address_to_object<Collection>(collection_data.collection_address);
+        let royalty = royalty::create(ROYALTY_NUMERATOR, ROYALTY_DENOMINATOR, signer::address_of(admin));
         let token_constructor_ref = token::create_token(
             admin,
             collection,
             concat_strings(utf8(b"Certificate of "), course_id),
             course_id,
-            option::some(SELL_BANNED_ROYALTY),
+            option::some(royalty),
             utf8(b"Course Certificate")
         );
         let token = object::object_from_constructor_ref<Token>(&token_constructor_ref);
@@ -348,27 +352,26 @@ module dev::certificate {
     public fun view_user_certificates(
         user_address: address
     ): vector<Object<Token>> acquires UserCertificatesTable, CourseRegistry {
-        let user_certs = vector::empty<token::Token>();
         if (!exists<UserCertificatesTable>(@dev)) {
             return vector::empty()
         };
 
         let certificates = vector::empty<Object<Token>>();
         let user_certs = borrow_global<UserCertificatesTable>(@dev);
-        let course_user_table = user_certs.certificates;
-        let courses = borrow_global<CourseRegistry>(@dev).courses;
-        let (course_id_in_loop, course_in_loop) = courses.borrow_front();
-        let course_id_inl_loop = course_id_in_loop;
+        let course_user_table = &user_certs.certificates;
+        let courses = &borrow_global<CourseRegistry>(@dev).courses;
+        let (course_id_in_loop, _) = courses.borrow_front();
+        
         while (true) {
             let next_course_id = courses.next_key(&course_id_in_loop);
             if (next_course_id.is_none()) {
                 break;
             }
             else {
-                if (course_user_table.contains(course_id_in_loop)) {
-                    let course_table = course_user_table.borrow(course_id_in_loop);
-                    if (course_table.contains(user_address)) {
-                        let course_cert = course_table.borrow(user_address);
+                if (course_user_table.contains(&course_id_in_loop)) {
+                    let course_table = course_user_table.borrow(&course_id_in_loop);
+                    if (course_table.contains(&user_address)) {
+                        let course_cert = course_table.borrow(&user_address);
                         let token_address = course_cert.token_address;
                         let token = object::address_to_object<Token>(token_address);
                         certificates.push_back(token);
@@ -389,23 +392,29 @@ module dev::certificate {
     // Admin view certificate issuance situation
     #[view]
     public fun view_certificate_stats(
-        admin: &signer,
         course: String
-    ): Table<address, CourseCertificate> acquires UserCertificatesTable, CourseCertificate {
-        assert!(is_admin(admin), E_NOT_ADMIN);
+    ): vector<address> acquires UserCertificatesTable {
         if (!exists<UserCertificatesTable>(@dev)) {
-            let stats = table::new<address, CourseCertificate>();
-            return stats
+            return vector::empty()
         };
         let user_certs = borrow_global<UserCertificatesTable>(@dev);
-        let courses = user_certs.certificates.borrow(course);
-        return *courses
+        let course_cert_table = user_certs.certificates.borrow(&course);
+        let users = vector::empty<address>();
+        let (user_address_in_loop, _) = course_cert_table.borrow_front();
+        while (true) {
+            users.push_back(user_address_in_loop);
+            let next_user_address = course_cert_table.next_key(&user_address_in_loop);
+            if (next_user_address.is_none()) {
+                break;
+            };
+            user_address_in_loop = *next_user_address.borrow();
+        };
+        return users
     }
 
-    // Admin view coin total supply
+    // View coin total supply
     #[view]
-    public fun view_total_coin_supply(admin: &signer): Option<u128> {
-        assert!(is_admin(admin), E_NOT_ADMIN);
+    public fun view_total_coin_supply(): Option<u128> {
         coin::supply<M2LCoin>()
     }
 
@@ -422,8 +431,8 @@ module dev::certificate {
         recipient: address,
         amount: u64
     ) acquires MintStore {
-        let mint_cap = borrow_global<MintStore>(signer::address_of(admin)).cap;
-        let coin = coin::mint(amount, &mint_cap);
+        let mint_store = borrow_global<MintStore>(signer::address_of(admin));
+        let coin = coin::mint(amount, &mint_store.cap);
         coin::deposit(recipient, coin);
         
         event::emit(CoinMintEvent {
@@ -439,11 +448,11 @@ module dev::certificate {
             return false
         };
         let course_user_certs_table = borrow_global<UserCertificatesTable>(@dev);
-        if (!course_user_certs_table.certificates.contains(course_id)) {
+        if (!course_user_certs_table.certificates.contains(&course_id)) {
             return false
         };
-        let user_cert_table = course_user_certs_table.certificates.borrow(course_id);
-        if (user_cert_table.contains(user)) {
+        let user_cert_table = course_user_certs_table.certificates.borrow(&course_id);
+        if (user_cert_table.contains(&user)) {
             return true
         };
         false
@@ -458,14 +467,22 @@ module dev::certificate {
     ) acquires UserCertificatesTable {
         if (!exists<UserCertificatesTable>(@dev)) {
             move_to(admin, UserCertificatesTable {
-                certificates: table::new()
+                certificates: big_ordered_map::new_with_config(
+                    0,
+                    0,
+                    true
+                )
             });
         };
         let user_certs = borrow_global_mut<UserCertificatesTable>(@dev);
-        if (!user_certs.certificates.contains(course_id)) {
-            user_certs.certificates.add(course_id, table::new());
+        if (!user_certs.certificates.contains(&course_id)) {
+            user_certs.certificates.add(course_id, big_ordered_map::new_with_config(
+                0,
+                0,
+                true
+            ));
         };
-        let user_cert_table = user_certs.certificates.borrow_mut(course_id);
+        let user_cert_table = user_certs.certificates.borrow_mut(&course_id);
         let user_address = signer::address_of(user);
         let token_address = object::object_address(&token);
         user_cert_table.add(user_address, CourseCertificate {
@@ -481,10 +498,9 @@ module dev::certificate {
         course_id: String,
         user_address: address
     ): CourseCertificate acquires UserCertificatesTable {
-        let course_user_token_table = borrow_global_mut<UserCertificatesTable>(@dev);
-        let user_token_table = course_user_token_table.certificates.borrow_mut(course_id);
-        let user_token = user_token_table.borrow(user_address);
-        *user_token
+        let course_user_token_table = borrow_global<UserCertificatesTable>(@dev);
+        let user_token_table = course_user_token_table.certificates.borrow(&course_id);
+        *user_token_table.borrow(&user_address)
     }
 
     // String concatenation helper function
@@ -493,5 +509,14 @@ module dev::certificate {
         result.append(*str1.bytes());
         result.append(*str2.bytes());
         utf8(result)
+    }
+
+    // Getter functions for CourseMeta
+    public fun get_course_points(course_meta: &CourseMeta): u64 {
+        course_meta.points
+    }
+
+    public fun get_course_metadata_uri(course_meta: &CourseMeta): String {
+        course_meta.metadata_uri
     }
 }
