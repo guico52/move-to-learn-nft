@@ -1,4 +1,4 @@
-// 证书签发模块
+// Certificate issuance module
 module dev::certificate {
 
     use std::option;
@@ -21,27 +21,28 @@ module dev::certificate {
     use aptos_token_objects::collection;
     use aptos_token_objects::royalty::{Royalty};
 
-    // 定义错误码
+    // Error codes
     const E_NOT_ADMIN: u64 = 1;
-    // 调用者非管理员
+    // Caller is not admin
     const E_ALREADY_CLAIMED: u64 = 2;
-    // 课程已被领取
+    // Course already claimed
     const E_INSUFFICIENT_BALANCE: u64 = 3;
-    // 余额不足
+    // Insufficient balance
     const E_COURSE_NOT_EXISTS: u64 = 4;
-    // 课程不存在
+    // Course does not exist
     const E_ALREADY_HAVE_CERTIFICATE: u64 = 5;
-    // 已经拥有证书
+    // Already have certificate
     const E_COURSE_ALREADY_EXISTS: u64 = 6;
-    // 课程已存在
-    const E_COURSE_NOT_FOUND: u64 = 7; // 课程不存在
+    // Course already exists
+    const E_COURSE_NOT_FOUND: u64 = 7; 
+    // Course not found
 
-    const ADMIN_ADDRESS: address = @dev; // 管理员地址
+    const ADMIN_ADDRESS: address = @dev; // Admin address
 
     const SELL_BANNED_ROYALTY: Royalty = royalty::create(1, 1, @dev);
-    // 定义一些类型
+    // Type definitions
 
-    // 用户积分系统及其能力
+    // User points system and capabilities
     struct M2LCoin has store {}
 
     struct MintStore has key { cap: coin::MintCapability<M2LCoin> }
@@ -50,23 +51,23 @@ module dev::certificate {
 
     struct FreezeStore has key { cap: coin::FreezeCapability<M2LCoin> }
 
-    // 课程元数据结构
+    // Course metadata structure
     struct CourseMeta has store {
         points: u64,
         metadata_uri: String,
     }
 
-    // 课程注册表
+    // Course registry
     struct CourseRegistry has key {
         courses: BigOrderedMap<String, CourseMeta>
     }
 
-    // 课程证书集合
+    // Course certificate collection
     struct CourseCollection has store {
         inner: ConstructorRef,
     }
 
-    // 课程证书NFT
+    // Course certificate NFT
     struct CourseCertificate has key, store {
         token: Object<token::Token>,
         token_address: address,
@@ -74,13 +75,12 @@ module dev::certificate {
         course_id: String
     }
 
-    // 用户证书记录表
+    // User certificate record table
     struct UserCertificatesTable has key {
         certificates: Table<String, Table<address, CourseCertificate>> // course_id ->  user_id -> CourseCertificate
     }
 
-
-    // 铸造证书事件
+    // Mint certificate event
     #[event]
     struct MintCertificateEvent has drop, store {
         course_id: String,
@@ -91,7 +91,7 @@ module dev::certificate {
         status: String, // started/completed
     }
 
-    // 课程注册事件
+    // Course register event
     #[event]
     struct CourseRegisterEvent has drop, store {
         course_id: String,
@@ -101,7 +101,7 @@ module dev::certificate {
         metadata_uri: String,
     }
 
-    // 代币铸造事件
+    // Coin mint event
     #[event]
     struct CoinMintEvent has drop, store {
         recipient: address,
@@ -109,7 +109,7 @@ module dev::certificate {
         timestamp: u64,
     }
 
-    // 证书转移事件
+    // Certificate transfer event
     #[event]
     struct CertificateTransferEvent has drop, store {
         course_id: String,
@@ -119,7 +119,7 @@ module dev::certificate {
         timestamp: u64,
     }
 
-    // 错误事件
+    // Error event
     #[event]
     struct ErrorEvent has drop, store {
         error_code: u64,
@@ -127,8 +127,8 @@ module dev::certificate {
         timestamp: u64,
     }
 
-    // ================= 合约交互部分 ====================
-    // 初始化合约
+    // ================= Contract Interaction Part ====================
+    // Initialize contract
     public entry fun initialize(admin: &signer) {
         assert!(is_admin(admin), E_NOT_ADMIN);
         move_to(admin, CourseRegistry {
@@ -136,23 +136,23 @@ module dev::certificate {
         });
         let coin_name = utf8(b"m2l_coin");
         let coin_symbol = utf8(b"m2l");
-        // 注册coin
+        // Register coin
         let (burn, freeze, mint) =
             coin::initialize<M2LCoin>(admin, coin_name, coin_symbol, 8, false);
-        // 存储coin的mint, burn, freeze能力
+        // Store coin's mint, burn, freeze capabilities
         move_to(admin, MintStore { cap: mint });
         move_to(admin, BurnStore { cap: burn });
         move_to(admin, FreezeStore { cap: freeze });
     }
 
-    // 注册/更新课程
+    // Register/update course
     public entry fun set_course(
         admin: &signer,
         course_id: String,
         points: u64,
         metadata_uri: String
     ) acquires CourseRegistry {
-        // 错误处理
+        // Error handling
         if (!is_admin(admin)) {
             event::emit(ErrorEvent {
                 error_code: E_NOT_ADMIN,
@@ -165,10 +165,10 @@ module dev::certificate {
         let registry = borrow_global_mut<CourseRegistry>(signer::address_of(admin));
         let is_new = !registry.courses.contains(&course_id);
         
-        // 如果课程不存在，说明是插入操作，因此需要为这个课程添加证书
+        // If course does not exist, it means it's an insertion operation, so we need to add a certificate for this course
         if (is_new) {
             let admin_address = signer::address_of(admin);
-            // 设置版税为100%，避免被转售
+            // Set royalty to 100% to prevent being resold
             let cert_name = concat_strings(utf8(b"Certificate of "), course_id);
             let royalty = royalty::create(1, 1, admin_address);
             let cert_collection = collection::create_unlimited_collection(
@@ -187,7 +187,7 @@ module dev::certificate {
             metadata_uri
         });
 
-        // 触发课程注册事件
+        // Trigger course register event
         event::emit(CourseRegisterEvent {
             course_id,
             points,
@@ -197,7 +197,7 @@ module dev::certificate {
         });
     }
 
-    // 删除课程信息
+    // Remove course information
     public entry fun remove_course(
         admin: &signer,
         course_id: String
@@ -235,12 +235,12 @@ module dev::certificate {
         });
     }
 
-    // 获取课程信息
+    // Get course information
     public fun get_course_info(
         course_id: String
     ): CourseMeta acquires CourseRegistry {
         let registry = borrow_global<CourseRegistry>(@dev);
-        assert!(registry.courses.contains(&course_id), E_COURSE_NOT_FOUND); // 确保课程存在
+        assert!(registry.courses.contains(&course_id), E_COURSE_NOT_FOUND); // Ensure course exists
         let meta = registry.courses.borrow(&course_id);
         CourseMeta {
             points: meta.points,
@@ -248,7 +248,7 @@ module dev::certificate {
         }
     }
 
-    // 铸造证书和代币给用户
+    // Mint certificate and coins to user
     public entry fun mint_certificate_and_coins(
         admin: &signer,
         user: &signer,
@@ -257,7 +257,7 @@ module dev::certificate {
     ) acquires UserCertificatesTable, MintStore, CourseCollection, CourseRegistry {
         let user_address = signer::address_of(user);
 
-        // 验证管理员权限
+        // Verify admin permission
         if (!is_admin(admin)) {
             event::emit(ErrorEvent {
                 error_code: E_NOT_ADMIN,
@@ -267,7 +267,7 @@ module dev::certificate {
             assert!(false, E_NOT_ADMIN);
         };
 
-        // 验证用户是否已经拥有该课程证书
+        // Verify if user already has the course certificate
         if (has_certificate(user_address, course_id)) {
             event::emit(ErrorEvent {
                 error_code: E_ALREADY_HAVE_CERTIFICATE,
@@ -277,17 +277,17 @@ module dev::certificate {
             assert!(false, E_ALREADY_HAVE_CERTIFICATE);
         };
 
-        // 开始铸造证书事件
+        // Start mint certificate event
         event::emit(MintCertificateEvent {
             course_id: course_id,
             recipient: user_address,
-            token_id: @0x0, // 临时地址，稍后更新
+            token_id: @0x0, // Temporary address, will be updated later
             timestamp: aptos_framework::timestamp::now_seconds(),
-            points: 0, // 临时值，稍后更新
+            points: 0, // Temporary value, will be updated later
             status: utf8(b"started"),
         });
 
-        // 铸造代币
+        // Mint coins
         if (coin_amount > 0) {
             mint_coin_to_account(admin, user_address, coin_amount);
             event::emit(CoinMintEvent {
@@ -297,7 +297,7 @@ module dev::certificate {
             });
         };
 
-        // 铸造证书NFT
+        // Mint certificate NFT
         let collection = borrow_global<CourseCollection>(@dev);
         let collection_constructor_ref = collection.inner;
         let collection = object::object_from_constructor_ref<Collection>(&collection_constructor_ref);
@@ -312,15 +312,15 @@ module dev::certificate {
         let token = object::object_from_constructor_ref<Token>(&token_constructor_ref);
         let token_address = object::object_address(&token);
 
-        // 记录证书发放
+        // Record certificate issuance
         record_certificate(course_id, admin, user, token);
 
-        // 获取课程积分
+        // Get course points
         let registry = borrow_global<CourseRegistry>(@dev);
         let course_meta = registry.courses.borrow(&course_id);
         let points = course_meta.points;
 
-        // 转移证书给用户
+        // Transfer certificate to user
         object::transfer(admin, token, user_address);
         event::emit(CertificateTransferEvent {
             course_id,
@@ -330,7 +330,7 @@ module dev::certificate {
             timestamp: aptos_framework::timestamp::now_seconds(),
         });
 
-        // 完成铸造证书事件
+        // Complete mint certificate event
         event::emit(MintCertificateEvent {
             course_id,
             recipient: user_address,
@@ -341,9 +341,10 @@ module dev::certificate {
         });
     }
 
-    // ========================== 视图函数部分 ========================
+    // ========================== View Function Part ========================
 
-    // 查看用户拥有的证书
+    // View user's certificates
+    #[view]
     public fun view_user_certificates(
         user_address: address
     ): vector<Object<Token>> acquires UserCertificatesTable, CourseRegistry {
@@ -379,12 +380,14 @@ module dev::certificate {
         certificates
     }
 
-    // 查看用户的代币余额
+    // View user's coin balance
+    #[view]
     public fun view_user_balance(user_address: address): u64 {
         coin::balance<M2LCoin>(user_address)
     }
 
-    // 管理员查看证书发放情况
+    // Admin view certificate issuance situation
+    #[view]
     public fun view_certificate_stats(
         admin: &signer,
         course: String
@@ -399,20 +402,21 @@ module dev::certificate {
         return *courses
     }
 
-    // 管理员查看代币总量
+    // Admin view coin total supply
+    #[view]
     public fun view_total_coin_supply(admin: &signer): Option<u128> {
         assert!(is_admin(admin), E_NOT_ADMIN);
         coin::supply<M2LCoin>()
     }
 
-    // ========================== 工具函数部分 ========================
-    // 确定signer是否是管理员
+    // ========================== Tool Function Part ========================
+    // Determine if signer is admin
     public fun is_admin(admin: &signer): bool {
         signer::address_of(admin) == @dev
     }
 
 
-    // 铸造coin到对应的账户
+    // Mint coin to corresponding account
     fun mint_coin_to_account(
         admin: &signer,
         recipient: address,
@@ -429,7 +433,7 @@ module dev::certificate {
         });
     }
 
-    // 检查用户是否已经拥有某个课程的证书
+    // Check if user already has a certificate for a course
     fun has_certificate(user: address, course_id: String): bool acquires UserCertificatesTable {
         if (!exists<UserCertificatesTable>(@dev)) {
             return false
@@ -445,7 +449,7 @@ module dev::certificate {
         false
     }
 
-    // 记录用户获得证书
+    // Record user obtaining certificate
     fun record_certificate(
         course_id: String,
         admin: &signer,
@@ -472,7 +476,7 @@ module dev::certificate {
         });
     }
 
-    // 获取课程证书token
+    // Get course certificate token
     fun get_certificate_token(
         course_id: String,
         user_address: address
@@ -483,7 +487,7 @@ module dev::certificate {
         *user_token
     }
 
-    // 字符串拼接辅助函数
+    // String concatenation helper function
     fun concat_strings(str1: String, str2: String): String {
         let result = vector::empty<u8>();
         result.append(*str1.bytes());
