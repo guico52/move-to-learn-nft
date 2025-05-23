@@ -161,7 +161,7 @@ module dev::certificate {
         };
 
         let registry = borrow_global_mut<CourseRegistry>(signer::address_of(admin));
-        let is_new = !simple_map::contains_key(&registry.courses, &course_id);
+        let is_new = !registry.courses.contains_key(&course_id);
         
         if (is_new) {
             // If course does not exist, it means it's an insertion operation, so we need to add a certificate for this course
@@ -186,7 +186,7 @@ module dev::certificate {
             });
         } else {
             // Update existing course
-            simple_map::remove(&mut registry.courses, &course_id);
+            registry.courses.remove(&course_id);
             registry.courses.add(course_id, CourseMeta {
                 points,
                 metadata_uri
@@ -218,7 +218,7 @@ module dev::certificate {
         };
 
         let registry = borrow_global_mut<CourseRegistry>(signer::address_of(admin));
-        if (!simple_map::contains_key(&registry.courses, &course_id)) {
+        if (!registry.courses.contains_key(&course_id)) {
             event::emit(ErrorEvent {
                 error_code: E_COURSE_NOT_FOUND,
                 error_message: utf8(b"Course not found"),
@@ -227,7 +227,7 @@ module dev::certificate {
             assert!(false, E_COURSE_NOT_FOUND);
         };
 
-        let course_meta = simple_map::borrow(&registry.courses, &course_id);
+        let course_meta = registry.courses.borrow(&course_id);
         let points = course_meta.points;
         let metadata_uri = course_meta.metadata_uri;
         registry.courses.remove(&course_id);
@@ -246,8 +246,8 @@ module dev::certificate {
         course_id: String
     ): CourseMeta acquires CourseRegistry {
         let registry = borrow_global<CourseRegistry>(@dev);
-        assert!(simple_map::contains_key(&registry.courses, &course_id), E_COURSE_NOT_FOUND); // Ensure course exists
-        let meta = simple_map::borrow(&registry.courses, &course_id);
+        assert!(registry.courses.contains_key(&course_id), E_COURSE_NOT_FOUND); // Ensure course exists
+        let meta = registry.courses.borrow(&course_id);
         CourseMeta {
             points: meta.points,
             metadata_uri: meta.metadata_uri
@@ -323,7 +323,7 @@ module dev::certificate {
 
         // Get course points
         let registry = borrow_global<CourseRegistry>(@dev);
-        let course_meta = simple_map::borrow(&registry.courses, &course_id);
+        let course_meta = registry.courses.borrow(&course_id);
         let points = course_meta.points;
 
         // Transfer certificate to user
@@ -412,11 +412,11 @@ module dev::certificate {
             return false
         };
         let course_user_certs_table = borrow_global<UserCertificatesTable>(@dev);
-        if (!simple_map::contains_key(&course_user_certs_table.certificates, &course_id)) {
+        if (!course_user_certs_table.certificates.contains_key(&course_id)) {
             return false
         };
-        let user_cert_table = simple_map::borrow(&course_user_certs_table.certificates, &course_id);
-        if (simple_map::contains_key(user_cert_table, &user)) {
+        let user_cert_table = course_user_certs_table.certificates.borrow(&course_id);
+        if (user_cert_table.contains_key(&user)) {
             return true
         };
         false
@@ -435,10 +435,10 @@ module dev::certificate {
             });
         };
         let user_certs = borrow_global_mut<UserCertificatesTable>(@dev);
-        if (!simple_map::contains_key(&user_certs.certificates, &course_id)) {
+        if (!user_certs.certificates.contains_key(&course_id)) {
             user_certs.certificates.add(course_id, simple_map::new());
         };
-        let user_cert_table = simple_map::borrow_mut(&mut user_certs.certificates, &course_id);
+        let user_cert_table = user_certs.certificates.borrow_mut(&course_id);
         let user_address = signer::address_of(user);
         let token_address = object::object_address(&token);
         user_cert_table.add(user_address, CourseCertificate {
@@ -455,8 +455,8 @@ module dev::certificate {
         user_address: address
     ): CourseCertificate acquires UserCertificatesTable {
         let course_user_token_table = borrow_global<UserCertificatesTable>(@dev);
-        let user_token_table = simple_map::borrow(&course_user_token_table.certificates, &course_id);
-        *simple_map::borrow(user_token_table, &user_address)
+        let user_token_table = course_user_token_table.certificates.borrow(&course_id);
+        *user_token_table.borrow(&user_address)
     }
 
     // String concatenation helper function
