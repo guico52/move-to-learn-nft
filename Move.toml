@@ -4,7 +4,7 @@ version = "1.0.0"
 authors = []
 
 [addresses]
-dev = "0x977c7902da13b767c3e712a8fb5bc352affbe59013db5088495c0730d766ab35"
+dev = "0x09e088a2b6825eeaa03f923d7e99116951f666cc1a8cfabd5969751c12e49dbc"
 aptos_framework = "0x1"
 aptos_token_objects = "0x4"  # Token Objects 的标准地址
 [dev-addresses]
